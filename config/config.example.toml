@@ -1,0 +1,26 @@
+# steam-idled configuration file
+# Location: ~/.config/steam-idled/config.toml
+
+# Automatically start idling configured games when daemon launches
+enabled = false
+
+# List of default Steam AppIDs to idle
+# 730 = Counter-Strike 2
+# 570 = Dota 2
+# 440 = Team Fortress 2
+games = [730]
+
+# Auto-resume:
+# When true, daemon detects if real CS2 (cs2 executable) is launched,
+# immediately clears idle presence so you can play without conflicts,
+# and resumes idle presence once the real game process closes.
+auto_resume = true
+
+# Delay in seconds to wait after real game exits before resuming idle
+resume_delay_seconds = 10
+
+# Optional custom socket path (defaults to $XDG_RUNTIME_DIR/steam-idled.sock)
+# socket_path = "/run/user/1000/steam-idled.sock"
+
+# Optional custom log path (defaults to ~/.local/state/steam-idled/steam-idled.log)
+# log_path = "/home/user/.local/state/steam-idled/steam-idled.log"

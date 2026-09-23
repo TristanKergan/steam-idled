@@ -1,0 +1,11 @@
+[Unit]
+Description=Steam Idle Daemon
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/steam-idled
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
