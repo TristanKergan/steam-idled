@@ -25,6 +25,10 @@ pub struct Engine {
     daemon_start: Instant,
     /// Whether idle should be resumed when Steam reconnects
     should_resume_after_steam_reconnect: bool,
+    /// Manual override flag (set by `cs stop`, cleared by `cs start`)
+    manual_stop: bool,
+    /// Timestamp of last Steam connection retry attempt
+    last_steam_retry: Option<Instant>,
     /// Resolved socket path
     socket_path: PathBuf,
 }
@@ -45,6 +49,8 @@ impl Engine {
             session_starts: HashMap::new(),
             daemon_start: Instant::now(),
             should_resume_after_steam_reconnect: false,
+            manual_stop: false,
+            last_steam_retry: None,
             socket_path,
         }
     }
@@ -54,35 +60,52 @@ impl Engine {
         self.state
     }
 
+    #[allow(dead_code)]
+    pub fn is_manual_stop(&self) -> bool {
+        self.manual_stop
+    }
+
     pub fn config(&self) -> &Config {
         &self.config
     }
 
     /// Attempt initial connection to Steam.
     pub async fn initialize_steam(&mut self) -> Result<()> {
+        let retry_secs = self.config.get_steam_retry_duration().as_secs();
         self.transition_to(DaemonState::Connecting)?;
-        info!("Connecting to Steam client...");
+        info!("daemon started");
+        info!("checking Steam connection");
+
+        if !self.steam.is_steam_running().await {
+            warn!("Steam is not running");
+            info!("retrying Steam connection in {} seconds", retry_secs);
+            self.last_steam_retry = Some(Instant::now());
+            self.transition_to(DaemonState::SteamDisconnected)?;
+            return Ok(());
+        }
 
         match self.steam.connect().await {
             Ok(_) => {
+                info!("Steam detected");
+                info!("connected to Steam");
                 self.transition_to(DaemonState::IdleStopped)?;
-                info!("Steam connected successfully. Ready for commands.");
 
-                // If config has enabled = true, start idling immediately
-                if self.config.enabled {
-                    info!("Auto-start enabled in config. Starting idle session...");
-                    let games = self.config.games.clone();
+                // If config has enabled = true and not manually stopped, auto-start idle
+                if self.config.enabled && !self.manual_stop {
+                    let games = self.target_appids.clone();
+                    info!("starting idle for appid={:?}", games);
                     if let Err(e) = self.start_idle(games).await {
                         error!("Failed to auto-start idle: {}", e);
+                    } else {
+                        info!("idle active");
                     }
                 }
                 Ok(())
             }
             Err(e) => {
-                warn!(
-                    "Could not connect to Steam client: {}. Waiting for Steam...",
-                    e
-                );
+                warn!("Steam is not running: {}", e);
+                info!("retrying Steam connection in {} seconds", retry_secs);
+                self.last_steam_retry = Some(Instant::now());
                 self.transition_to(DaemonState::SteamDisconnected)?;
                 Ok(())
             }
@@ -102,8 +125,14 @@ impl Engine {
         Ok(())
     }
 
-    /// Start idling specified appids.
+    /// Start idling specified appids (clears manual override).
     pub async fn start_idle(&mut self, appids: Vec<u32>) -> Result<()> {
+        // Clear manual stop override
+        if self.manual_stop {
+            info!("Manual stop cleared. Starting idle presence...");
+            self.manual_stop = false;
+        }
+
         let games_to_run = if appids.is_empty() {
             if self.config.games.is_empty() {
                 vec![730] // Default CS2
@@ -155,16 +184,20 @@ impl Engine {
         }
     }
 
-    /// Stop all active idling games.
+    /// Stop all active idling games (activates manual override).
     pub async fn stop_all(&mut self) -> Result<()> {
+        // Activate manual override
+        self.manual_stop = true;
+        self.should_resume_after_steam_reconnect = false;
+
         if self.state == DaemonState::IdleStopped {
-            info!("Idle presence is already stopped");
+            info!("Idle presence is already stopped (manual override active)");
             return Ok(());
         }
-        info!("Stopping all active idle presences");
+
+        info!("Stopping all active idle presences (manual override active)");
         let _ = self.steam.clear_games_played().await;
         self.session_starts.clear();
-        self.should_resume_after_steam_reconnect = false;
         self.transition_to(DaemonState::IdleStopped)?;
         info!("Game presence stopped");
         Ok(())
@@ -196,43 +229,81 @@ impl Engine {
         }
     }
 
-    /// Periodic maintenance tick (heartbeat, real game detector, reconnect).
+    /// Periodic maintenance tick (heartbeat, real game detector, reconnect timer).
     pub async fn tick(&mut self) -> Result<()> {
-        // 1. Steam connection verification
-        let is_running = self.steam.is_steam_running().await;
+        let retry_duration = self.config.get_steam_retry_duration();
+        let retry_secs = retry_duration.as_secs();
 
-        if !is_running {
-            if self.state.is_steam_connected() {
+        // 1. Steam connection monitoring when connected
+        if self.state.is_steam_connected() {
+            let is_running = self.steam.is_steam_running().await;
+            if !is_running {
                 warn!("Steam client connection lost!");
-                if self.state == DaemonState::IdleRunning {
+                if self.state == DaemonState::IdleRunning && !self.manual_stop {
                     self.should_resume_after_steam_reconnect = true;
                 }
                 let _ = self.steam.clear_games_played().await;
                 self.transition_to(DaemonState::SteamDisconnected)?;
+                info!("retrying Steam connection in {} seconds", retry_secs);
+                self.last_steam_retry = Some(Instant::now());
+                return Ok(());
             }
-            return Ok(());
         }
 
-        // If we were disconnected from Steam, try reconnecting
+        // 2. Reconnection retry loop when Steam is disconnected
         if self.state == DaemonState::SteamDisconnected || self.state == DaemonState::Reconnecting {
-            self.transition_to(DaemonState::Reconnecting)?;
-            debug!("Attempting to reconnect to Steam...");
-            if self.steam.connect().await.is_ok() {
-                info!("Reconnected to Steam client");
-                if self.should_resume_after_steam_reconnect && !self.target_appids.is_empty() {
-                    info!("Restoring previous idle session...");
-                    let games = self.target_appids.clone();
-                    self.transition_to(DaemonState::Connected)?;
-                    let _ = self.start_idle(games).await;
-                    self.should_resume_after_steam_reconnect = false;
-                } else {
-                    self.transition_to(DaemonState::IdleStopped)?;
+            let should_retry = match self.last_steam_retry {
+                Some(last) => Instant::now().duration_since(last) >= retry_duration,
+                None => true,
+            };
+
+            if should_retry {
+                self.last_steam_retry = Some(Instant::now());
+                info!("checking Steam connection");
+
+                if !self.steam.is_steam_running().await {
+                    warn!("Steam is still not running");
+                    info!("retrying Steam connection in {} seconds", retry_secs);
+                    return Ok(());
+                }
+
+                info!("Steam detected");
+                self.transition_to(DaemonState::Reconnecting)?;
+                match self.steam.connect().await {
+                    Ok(_) => {
+                        info!("connected to Steam");
+                        self.transition_to(DaemonState::Connected)?;
+
+                        // If NOT manually stopped, auto-resume or auto-start idle
+                        if !self.manual_stop
+                            && (self.should_resume_after_steam_reconnect || self.config.enabled)
+                        {
+                            let games = self.target_appids.clone();
+                            info!("starting idle for appid={:?}", games);
+                            if let Err(e) = self.start_idle(games).await {
+                                error!("Failed to resume idle: {}", e);
+                            } else {
+                                info!("idle active");
+                            }
+                            self.should_resume_after_steam_reconnect = false;
+                        } else {
+                            if self.manual_stop {
+                                info!("Manual stop active - idle not automatically started");
+                            }
+                            self.transition_to(DaemonState::IdleStopped)?;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Steam connection attempt failed: {}", e);
+                        info!("retrying Steam connection in {} seconds", retry_secs);
+                        self.transition_to(DaemonState::SteamDisconnected)?;
+                    }
                 }
             }
             return Ok(());
         }
 
-        // 2. Real CS2 process detection & auto-resume logic
+        // 3. Real CS2 process detection & auto-resume logic
         if self.config.auto_resume {
             let (_is_running, just_started, just_exited) = self.process_detector.update();
 
@@ -243,10 +314,15 @@ impl Engine {
                     self.transition_to(DaemonState::SuspendedForRealGame)?;
                 }
             } else if just_exited && self.state == DaemonState::SuspendedForRealGame {
-                info!("Real game closed. Resuming idle presence...");
-                let games = self.target_appids.clone();
-                self.transition_to(DaemonState::Connected)?;
-                let _ = self.start_idle(games).await;
+                if !self.manual_stop {
+                    info!("Real game closed. Resuming idle presence...");
+                    let games = self.target_appids.clone();
+                    self.transition_to(DaemonState::Connected)?;
+                    let _ = self.start_idle(games).await;
+                } else {
+                    info!("Real game closed, but manual stop is active. Idle remains stopped.");
+                    self.transition_to(DaemonState::IdleStopped)?;
+                }
             }
         }
 
@@ -287,6 +363,7 @@ impl Engine {
             total_session_secs,
             real_cs2_running: self.process_detector.is_active(),
             auto_resume_enabled: self.config.auto_resume,
+            manual_stop: self.manual_stop,
             uptime_secs: now.duration_since(self.daemon_start).as_secs(),
             socket_path: self.socket_path.clone(),
         }

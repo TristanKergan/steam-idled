@@ -60,8 +60,11 @@ impl DaemonState {
             // Connecting can succeed to Connected / IdleStopped or fail back
             (Connecting, Connected | IdleStopped | Disconnected | SteamDisconnected) => true,
 
-            // Connected / IdleStopped can start idle or lose Steam
-            (Connected | IdleStopped, IdleStarting | SteamDisconnected | Disconnected) => true,
+            // Connected and IdleStopped can interchange, start idle, or lose Steam
+            (
+                Connected | IdleStopped,
+                Connected | IdleStopped | IdleStarting | SteamDisconnected | Disconnected,
+            ) => true,
 
             // Starting can transition to Running or fail back to IdleStopped or SteamDisconnected
             (IdleStarting, IdleRunning | IdleStopped | SteamDisconnected) => true,
@@ -120,6 +123,7 @@ mod tests {
 
         let state = DaemonState::Connected;
         assert!(state.can_transition_to(DaemonState::IdleStarting));
+        assert!(state.can_transition_to(DaemonState::IdleStopped));
         assert!(state.can_transition_to(DaemonState::SteamDisconnected));
 
         let state = DaemonState::IdleRunning;

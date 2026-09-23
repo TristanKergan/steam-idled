@@ -7,7 +7,6 @@ echo "=========================================="
 
 PREFIX="${HOME}/.local"
 BIN_DIR="${PREFIX}/bin"
-LIB_DIR="${PREFIX}/lib"
 CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/steam-idled"
 SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
 
@@ -36,16 +35,13 @@ mkdir -p "${SYSTEMD_USER_DIR}"
 cp systemd/steam-idled.service "${SYSTEMD_USER_DIR}/steam-idled.service"
 
 if command -v systemctl >/dev/null 2>&1; then
-    echo "[5/5] Reloading systemd user daemon..."
+    echo "[5/5] Configuring systemd user service..."
     systemctl --user daemon-reload
-
-    if [[ "${1:-}" == "--enable" || "${1:-}" == "-e" ]]; then
-        echo "Enabling and starting steam-idled service..."
+    if [[ "${1:-}" != "--no-start" ]]; then
         systemctl --user enable --now steam-idled.service
+        echo "  -> Service steam-idled enabled and started for current user session!"
     else
-        echo ""
-        echo "To enable and start the daemon as a background service, run:"
-        echo "  systemctl --user enable --now steam-idled.service"
+        echo "  -> Run 'systemctl --user enable --now steam-idled.service' when ready."
     fi
 fi
 
@@ -56,9 +52,9 @@ echo "Ensure ${BIN_DIR} is in your PATH. If needed, add to ~/.bashrc or ~/.zshrc
 echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
 echo ""
 echo "Usage:"
-echo "  cs start      # Start idling Counter-Strike 2 (AppID 730)"
 echo "  cs status     # Check daemon and idle status"
-echo "  cs stop       # Stop idling"
+echo "  cs start      # Start idling Counter-Strike 2 (clears manual stop)"
+echo "  cs stop       # Stop idling (sets manual override)"
 echo "  cs games      # List configured games"
 echo "  cs logs       # View recent daemon logs"
 echo "=========================================="

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -17,7 +18,7 @@ pub enum ConfigError {
 }
 
 fn default_enabled() -> bool {
-    false
+    true
 }
 
 fn default_games() -> Vec<u32> {
@@ -30,6 +31,10 @@ fn default_auto_resume() -> bool {
 
 fn default_resume_delay_seconds() -> u64 {
     10
+}
+
+fn default_steam_retry_seconds() -> u64 {
+    15
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +51,9 @@ pub struct Config {
     #[serde(default = "default_resume_delay_seconds")]
     pub resume_delay_seconds: u64,
 
+    #[serde(default = "default_steam_retry_seconds")]
+    pub steam_retry_seconds: u64,
+
     #[serde(default)]
     pub socket_path: Option<PathBuf>,
 
@@ -60,6 +68,7 @@ impl Default for Config {
             games: default_games(),
             auto_resume: default_auto_resume(),
             resume_delay_seconds: default_resume_delay_seconds(),
+            steam_retry_seconds: default_steam_retry_seconds(),
             socket_path: None,
             log_path: None,
         }
@@ -127,6 +136,15 @@ impl Config {
         self.log_path.clone().unwrap_or_else(Self::default_log_path)
     }
 
+    /// Get validated retry duration for Steam reconnect (falls back to 15s if <= 0)
+    pub fn get_steam_retry_duration(&self) -> Duration {
+        if self.steam_retry_seconds == 0 {
+            Duration::from_secs(15)
+        } else {
+            Duration::from_secs(self.steam_retry_seconds)
+        }
+    }
+
     /// Load config from given file or use defaults.
     pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {
         let content = fs::read_to_string(path).map_err(|e| ConfigError::Io {
@@ -182,25 +200,39 @@ mod tests {
     #[test]
     fn test_default_config() {
         let cfg = Config::default();
-        assert!(!cfg.enabled);
+        assert!(cfg.enabled);
         assert_eq!(cfg.games, vec![730]);
         assert!(cfg.auto_resume);
         assert_eq!(cfg.resume_delay_seconds, 10);
+        assert_eq!(cfg.steam_retry_seconds, 15);
+        assert_eq!(cfg.get_steam_retry_duration(), Duration::from_secs(15));
     }
 
     #[test]
     fn test_parse_toml() {
         let raw = r#"
-            enabled = true
+            enabled = false
             games = [730, 570, 440]
             auto_resume = false
             resume_delay_seconds = 20
+            steam_retry_seconds = 30
         "#;
         let cfg: Config = toml::from_str(raw).expect("Failed to parse");
-        assert!(cfg.enabled);
+        assert!(!cfg.enabled);
         assert_eq!(cfg.games, vec![730, 570, 440]);
         assert!(!cfg.auto_resume);
         assert_eq!(cfg.resume_delay_seconds, 20);
+        assert_eq!(cfg.steam_retry_seconds, 30);
+        assert_eq!(cfg.get_steam_retry_duration(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_fallback_zero_retry() {
+        let cfg = Config {
+            steam_retry_seconds: 0,
+            ..Default::default()
+        };
+        assert_eq!(cfg.get_steam_retry_duration(), Duration::from_secs(15));
     }
 
     #[test]

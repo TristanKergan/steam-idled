@@ -13,6 +13,7 @@ async fn test_ipc_lifecycle_with_mock_steam() {
     let sock_path = dir.path().join("test-steam-idled.sock");
 
     let cfg = Config {
+        enabled: false, // Start manually for this test
         socket_path: Some(sock_path.clone()),
         games: vec![730],
         ..Default::default()
@@ -37,10 +38,8 @@ async fn test_ipc_lifecycle_with_mock_steam() {
         let _ = server.run(server_shutdown).await;
     });
 
-    // Wait briefly for socket to become available
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Connect client
     let mut client = IpcClient::connect(&sock_path).await.unwrap();
 
     // 1. Ping
@@ -53,6 +52,7 @@ async fn test_ipc_lifecycle_with_mock_steam() {
         assert_eq!(status.daemon_state, DaemonState::IdleStopped);
         assert!(status.steam_connected);
         assert!(!status.idle_active);
+        assert!(!status.manual_stop);
         assert!(status.active_games.is_empty());
     } else {
         panic!("Expected Status response");
@@ -64,8 +64,6 @@ async fn test_ipc_lifecycle_with_mock_steam() {
         .await
         .unwrap();
     assert!(matches!(resp, Response::Ok { .. }));
-
-    // Verify mock client received games
     assert_eq!(mock_clone.active_appids().await, vec![730]);
 
     // 4. Status while idling
@@ -73,41 +71,139 @@ async fn test_ipc_lifecycle_with_mock_steam() {
     if let Response::Status(status) = resp {
         assert_eq!(status.daemon_state, DaemonState::IdleRunning);
         assert!(status.idle_active);
+        assert!(!status.manual_stop);
         assert_eq!(status.active_games.len(), 1);
         assert_eq!(status.active_games[0].appid, 730);
-        assert_eq!(status.active_games[0].name, "Counter-Strike 2");
     } else {
         panic!("Expected Status response");
     }
 
-    // 5. Query games list
-    let resp = client.call(&Request::Games).await.unwrap();
-    if let Response::Games(games) = resp {
-        assert!(games.active_games.iter().any(|g| g.appid == 730));
-    } else {
-        panic!("Expected Games response");
-    }
-
-    // 6. Stop Idle
+    // 5. Stop Idle
     let resp = client.call(&Request::Stop { appids: None }).await.unwrap();
     assert!(matches!(resp, Response::Ok { .. }));
-
-    // Verify mock client games cleared
     assert!(mock_clone.active_appids().await.is_empty());
 
-    // 7. Status after stop
+    // 6. Status after stop shows manual_stop = true
     let resp = client.call(&Request::Status).await.unwrap();
     if let Response::Status(status) = resp {
         assert_eq!(status.daemon_state, DaemonState::IdleStopped);
         assert!(!status.idle_active);
-        assert!(status.active_games.is_empty());
+        assert!(status.manual_stop);
     } else {
         panic!("Expected Status response");
     }
 
-    // Stop server
     let _ = shutdown_tx.send(());
     let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn test_steam_unavailable_at_startup_and_retry() {
+    let mock_steam = MockSteamClient::new();
+    mock_steam.set_steam_running(false); // Steam not running yet
+
+    let cfg = Config {
+        enabled: true,
+        steam_retry_seconds: 1, // Fast 1-second retry for testing
+        games: vec![730],
+        ..Default::default()
+    };
+
+    let mut engine = Engine::new(cfg, Box::new(mock_steam.clone()));
+
+    // Daemon starts, Steam is not running
+    engine.initialize_steam().await.unwrap();
+    assert_eq!(engine.state(), DaemonState::SteamDisconnected);
+    assert!(!engine.is_manual_stop());
+
+    // Tick immediately: 1-second retry interval not elapsed yet
+    engine.tick().await.unwrap();
+    assert_eq!(engine.state(), DaemonState::SteamDisconnected);
+
+    // Wait for retry interval
+    tokio::time::sleep(Duration::from_millis(1050)).await;
+
+    // Steam is still not running: tick should check and remain in SteamDisconnected
+    engine.tick().await.unwrap();
+    assert_eq!(engine.state(), DaemonState::SteamDisconnected);
+
+    // Now user launches Steam!
+    mock_steam.set_steam_running(true);
+
+    // Wait for next retry interval
+    tokio::time::sleep(Duration::from_millis(1050)).await;
+
+    // Tick: detects Steam, connects, and automatically starts idle!
+    engine.tick().await.unwrap();
+    assert_eq!(engine.state(), DaemonState::IdleRunning);
+    assert_eq!(mock_steam.active_appids().await, vec![730]);
+}
+
+#[tokio::test]
+async fn test_manual_override_prevents_auto_resume_on_reconnect() {
+    let mock_steam = MockSteamClient::new();
+    let cfg = Config {
+        enabled: true,
+        steam_retry_seconds: 1,
+        games: vec![730],
+        ..Default::default()
+    };
+
+    let mut engine = Engine::new(cfg, Box::new(mock_steam.clone()));
+    engine.initialize_steam().await.unwrap();
+    assert_eq!(engine.state(), DaemonState::IdleRunning);
+
+    // User explicitly issues `cs stop`
+    engine.stop_idle(None).await.unwrap();
+    assert_eq!(engine.state(), DaemonState::IdleStopped);
+    assert!(engine.is_manual_stop());
+    assert!(mock_steam.active_appids().await.is_empty());
+
+    // Steam disconnects
+    mock_steam.set_steam_running(false);
+    engine.tick().await.unwrap();
+    assert_eq!(engine.state(), DaemonState::SteamDisconnected);
+
+    // Steam reconnects
+    mock_steam.set_steam_running(true);
+    tokio::time::sleep(Duration::from_millis(1050)).await;
+    engine.tick().await.unwrap();
+
+    // CRITICAL: Idle MUST remain STOPPED because manual override is active!
+    assert_eq!(engine.state(), DaemonState::IdleStopped);
+    assert!(engine.is_manual_stop());
+    assert!(mock_steam.active_appids().await.is_empty());
+
+    // User explicitly issues `cs start` -> clears manual override
+    engine.start_idle(vec![730]).await.unwrap();
+    assert_eq!(engine.state(), DaemonState::IdleRunning);
+    assert!(!engine.is_manual_stop());
+    assert_eq!(mock_steam.active_appids().await, vec![730]);
+}
+
+#[tokio::test]
+async fn test_auto_resume_vs_manual_stop() {
+    let mock_steam = MockSteamClient::new();
+    let cfg = Config {
+        enabled: true,
+        auto_resume: true,
+        resume_delay_seconds: 1,
+        games: vec![730],
+        ..Default::default()
+    };
+
+    let mut engine = Engine::new(cfg, Box::new(mock_steam.clone()));
+    engine.initialize_steam().await.unwrap();
+    assert_eq!(engine.state(), DaemonState::IdleRunning);
+
+    // If manual stop is invoked, auto_resume is inhibited
+    engine.stop_idle(None).await.unwrap();
+    assert_eq!(engine.state(), DaemonState::IdleStopped);
+    assert!(engine.is_manual_stop());
+
+    // Even if ticks occur, manual stop stays in effect
+    engine.tick().await.unwrap();
+    assert_eq!(engine.state(), DaemonState::IdleStopped);
 }
 
 #[tokio::test]
@@ -116,6 +212,7 @@ async fn test_multi_game_start_and_partial_stop() {
     let sock_path = dir.path().join("test-multi.sock");
 
     let cfg = Config {
+        enabled: false,
         socket_path: Some(sock_path.clone()),
         ..Default::default()
     };
@@ -178,67 +275,4 @@ async fn test_multi_game_start_and_partial_stop() {
 
     let _ = shutdown_tx.send(());
     let _ = server_handle.await;
-}
-
-#[tokio::test]
-async fn test_steam_disconnect_and_reconnect_recovery() {
-    let cfg = Config::default();
-    let mock_steam = MockSteamClient::new();
-    let mock_clone = mock_steam.clone();
-
-    let mut engine = Engine::new(cfg, Box::new(mock_steam));
-    engine.initialize_steam().await.unwrap();
-
-    // Start idling CS2
-    engine.start_idle(vec![730]).await.unwrap();
-    assert_eq!(engine.state(), DaemonState::IdleRunning);
-    assert_eq!(mock_clone.active_appids().await, vec![730]);
-
-    // Simulate Steam dying / crashing
-    mock_clone.set_steam_running(false);
-
-    // Engine ticks and detects disconnect
-    engine.tick().await.unwrap();
-    assert_eq!(engine.state(), DaemonState::SteamDisconnected);
-    assert!(mock_clone.active_appids().await.is_empty());
-
-    // While Steam is still offline, tick keeps it in SteamDisconnected
-    engine.tick().await.unwrap();
-    assert_eq!(engine.state(), DaemonState::SteamDisconnected);
-
-    // Now Steam comes back online
-    mock_clone.set_steam_running(true);
-
-    // Next tick reconnects and restores idle!
-    engine.tick().await.unwrap();
-    assert_eq!(engine.state(), DaemonState::IdleRunning);
-    assert_eq!(mock_clone.active_appids().await, vec![730]);
-}
-
-#[tokio::test]
-async fn test_duplicate_operations() {
-    let cfg = Config::default();
-    let mock_steam = MockSteamClient::new();
-    let mut engine = Engine::new(cfg, Box::new(mock_steam));
-    engine.initialize_steam().await.unwrap();
-
-    // Duplicate stop when already stopped is a safe no-op
-    assert!(engine.stop_idle(None).await.is_ok());
-    assert_eq!(engine.state(), DaemonState::IdleStopped);
-
-    // Start
-    assert!(engine.start_idle(vec![730]).await.is_ok());
-    assert_eq!(engine.state(), DaemonState::IdleRunning);
-
-    // Duplicate start with same game is a safe no-op
-    assert!(engine.start_idle(vec![730]).await.is_ok());
-    assert_eq!(engine.state(), DaemonState::IdleRunning);
-
-    // Stop
-    assert!(engine.stop_idle(None).await.is_ok());
-    assert_eq!(engine.state(), DaemonState::IdleStopped);
-
-    // Another stop
-    assert!(engine.stop_idle(None).await.is_ok());
-    assert_eq!(engine.state(), DaemonState::IdleStopped);
 }

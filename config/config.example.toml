@@ -1,8 +1,8 @@
 # steam-idled configuration file
 # Location: ~/.config/steam-idled/config.toml
 
-# Automatically start idling configured games when daemon launches
-enabled = false
+# Automatically start idling configured games on daemon / user session launch
+enabled = true
 
 # List of default Steam AppIDs to idle
 # 730 = Counter-Strike 2
@@ -18,6 +18,9 @@ auto_resume = true
 
 # Delay in seconds to wait after real game exits before resuming idle
 resume_delay_seconds = 10
+
+# Interval in seconds to wait between retry attempts when Steam client is not running
+steam_retry_seconds = 15
 
 # Optional custom socket path (defaults to $XDG_RUNTIME_DIR/steam-idled.sock)
 # socket_path = "/run/user/1000/steam-idled.sock"

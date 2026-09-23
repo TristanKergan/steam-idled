@@ -63,6 +63,7 @@ pub struct StatusPayload {
     pub total_session_secs: u64,
     pub real_cs2_running: bool,
     pub auto_resume_enabled: bool,
+    pub manual_stop: bool,
     pub uptime_secs: u64,
     pub socket_path: PathBuf,
 }

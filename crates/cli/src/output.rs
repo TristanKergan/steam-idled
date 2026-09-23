@@ -15,6 +15,7 @@ pub fn format_duration(seconds: u64) -> String {
 
 pub fn print_start_success(appids: &[u32], active_games: &[ActiveGameInfo]) {
     print_header();
+    println!("{} {}", "✓".green().bold(), "Manual stop cleared".white());
     println!("{} {}", "✓".green().bold(), "Connected to Steam".white());
     println!("{} {}", "✓".green().bold(), "Game presence enabled".white());
 
@@ -32,11 +33,11 @@ pub fn print_start_success(appids: &[u32], active_games: &[ActiveGameInfo]) {
 
 pub fn print_stop_success() {
     print_header();
-    println!("{} {}", "✓".green().bold(), "Game presence stopped".white());
+    println!("{} {}", "✓".green().bold(), "Idle stopped".white());
     println!(
         "{} {}",
         "✓".green().bold(),
-        "CS2 is ready to launch".white()
+        "Automatic idle temporarily disabled".white()
     );
 }
 
@@ -48,37 +49,43 @@ pub fn print_status(status: &StatusPayload) {
     let steam_str = if status.steam_connected {
         "CONNECTED".green().bold()
     } else {
-        "DISCONNECTED".red().bold()
+        "WAITING FOR STEAM (RETRYING)".yellow().bold()
     };
 
     let idle_str = match status.daemon_state {
         DaemonState::IdleRunning => "ACTIVE".green().bold(),
         DaemonState::IdleStarting => "STARTING".yellow().bold(),
-        DaemonState::IdleStopped | DaemonState::Connected => "STOPPED".yellow().bold(),
+        DaemonState::IdleStopped | DaemonState::Connected => {
+            if status.manual_stop {
+                "STOPPED (MANUAL OVERRIDE)".yellow().bold()
+            } else {
+                "STOPPED".yellow().bold()
+            }
+        }
         DaemonState::SuspendedForRealGame => "SUSPENDED (REAL GAME RUNNING)".cyan().bold(),
-        DaemonState::SteamDisconnected => "STEAM DISCONNECTED".red().bold(),
+        DaemonState::SteamDisconnected => "STEAM DISCONNECTED (WAITING)".yellow().bold(),
         DaemonState::Reconnecting => "RECONNECTING".yellow().bold(),
         DaemonState::Connecting => "CONNECTING".yellow().bold(),
         DaemonState::Disconnected => "DISCONNECTED".red().bold(),
         DaemonState::Stopping => "STOPPING".red().bold(),
     };
 
-    println!("{:<14} {}", "Daemon:", daemon_str);
-    println!("{:<14} {}", "Steam:", steam_str);
-    println!("{:<14} {}", "Idle:", idle_str);
+    println!("{:<16} {}", "Daemon:", daemon_str);
+    println!("{:<16} {}", "Steam:", steam_str);
+    println!("{:<16} {}", "Idle:", idle_str);
 
     if status.idle_active && !status.active_games.is_empty() {
         if status.active_games.len() == 1 {
             let game = &status.active_games[0];
-            println!("{:<14} {}", "Game:", game.name.bold());
-            println!("{:<14} {}", "AppID:", game.appid.to_string().cyan());
+            println!("{:<16} {}", "Game:", game.name.bold());
+            println!("{:<16} {}", "AppID:", game.appid.to_string().cyan());
             println!(
-                "{:<14} {}",
+                "{:<16} {}",
                 "Session:",
                 format_duration(game.session_duration_secs).bold()
             );
         } else {
-            println!("{:<14} {} active", "Games:", status.active_games.len());
+            println!("{:<16} {} active", "Games:", status.active_games.len());
             for game in &status.active_games {
                 println!(
                     "  • {} (AppID: {}) - {}",
@@ -88,7 +95,7 @@ pub fn print_status(status: &StatusPayload) {
                 );
             }
             println!(
-                "{:<14} {}",
+                "{:<16} {}",
                 "Total Session:",
                 format_duration(status.total_session_secs).bold()
             );
@@ -100,10 +107,18 @@ pub fn print_status(status: &StatusPayload) {
     } else {
         "NOT RUNNING".dimmed()
     };
-    println!("{:<14} {}", "Real process:", real_proc_str);
+    println!("{:<16} {}", "Real process:", real_proc_str);
+
+    if status.manual_stop {
+        println!(
+            "{:<16} {}",
+            "Manual override:",
+            "ACTIVE (run 'cs start' to resume)".yellow().bold()
+        );
+    }
 
     if status.auto_resume_enabled {
-        println!("{:<14} {}", "Auto-resume:", "ENABLED".green());
+        println!("{:<16} {}", "Auto-resume:", "ENABLED".green());
     }
 }
 
