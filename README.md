@@ -1,54 +1,112 @@
-# Steam Idle Daemon (`steam-idled`) & CLI (`cs`)
+# steam-idled
 
-A modern, standalone Linux daemon and command-line interface written in Rust for managing Steam game presence and playtime tracking without downloading or launching game assets.
+A small Linux daemon and CLI for managing Steam game presence.
 
-> **Note:**
-> The daemon does not launch the game executable.
-> It manages Steam game presence through the Steam client connection.
+The project runs a background daemon and exposes a simple `cs` command for
+starting, stopping, and inspecting an idle session without launching the actual
+game executable.
 
----
+## What it does
 
-## Features
+- Reports chosen Steam AppIDs (default: Counter-Strike 2, AppID `730`) as running to your local Steam client.
+- Accumulates playtime on your Steam account without downloading or running game binaries.
+- Connects through the local Steam client IPC; does not require Steam credentials, passwords, or tokens.
+- Supports idling multiple AppIDs simultaneously using isolated worker processes.
+- Detects when the real `cs2` process starts via `/proc`, pauses idle presence to avoid conflicts, and resumes it after exit (`auto_resume`).
+- Provides an explicit manual override: `cs stop` keeps idle stopped until you run `cs start`.
 
-- **Automatic Session Idle**: Starts automatically on Linux user login via `systemd --user`. Idle for Counter-Strike 2 begins immediately without needing manual intervention.
-- **15-Second Steam Retry Loop**: If Steam is not running at system startup or exits, the daemon waits patiently and checks every 15 seconds without busy-polling or high CPU usage.
-- **Explicit Manual Override**:
-  - `cs stop` immediately stops idling and temporarily disables automatic idle, giving you full control to launch the real CS2 game.
-  - `cs start` clears the manual override and re-enables idling.
-- **Safe Real Game Detection (`auto_resume`)**: Non-invasive `/proc` scanner temporarily suspends idle when the real `cs2` binary starts, and resumes it after exit with a debounce delay.
-- **Multi-Game Support**: Concurrently idle Counter-Strike 2 (730), Dota 2 (570), Team Fortress 2 (440), or any Steam AppID.
-- **Secure Local IPC**: Strict Unix Domain Socket communication (`0600` permissions), restricted strictly to your local user account. No TCP or remote ports.
+## How it works
 
----
+```text
+cs CLI
+   ↓  (Unix domain socket: $XDG_RUNTIME_DIR/steam-idled.sock)
+steam-idled daemon
+   ↓  (Subprocess per active game: steam-idled worker --appid <id>)
+Steamworks API (libsteam_api.so / steamclient.so)
+   ↓  (Local IPC: ~/.steam/steam.pipe)
+Steam desktop client
+   ↓  (Protobuf: CMsgClientGamesPlayed)
+Valve Steam servers
+```
 
-## Quick Start
+1. **CLI communication**: `cs` commands send JSON requests to `steam-idled` over a local Unix domain socket with `0600` permissions.
+2. **Worker isolation**: When an AppID is idled, the daemon spawns an internal worker subprocess (`steam-idled worker --appid <id>`). The worker calls `SteamAPI_Init` and pumps callbacks (`SteamAPI_RunCallbacks`) every 100 ms. Isolating workers prevents SDK singleton conflicts across multiple AppIDs and ensures worker crashes do not terminate the daemon.
+3. **Presence broadcast**: The local Steam desktop client detects the active game session over IPC and transmits `CMsgClientGamesPlayed` to Valve servers.
+4. **Presence removal**: Calling `cs stop` or stopping the daemon terminates the worker subprocess, which closes the Steamworks IPC handle and clears in-game status immediately.
+5. **Steam retry loop**: If Steam is not running when the daemon starts or if Steam closes, the daemon transitions to `SteamDisconnected` and retries connection every 15 seconds (`steam_retry_seconds`) using an async timer.
 
-### 1. Installation & Service Activation
+## Requirements
+
+- Linux (x86_64)
+- Steam desktop client installed and logged in
+- Rust toolchain (1.80+ for building from source)
+
+## Installation
+
+Clone the repository and run the installer:
 
 ```bash
-git clone https://github.com/TryDkg/Farm.git steam-idled
+git clone git@github.com:TristanKergan/steam-idled.git
 cd steam-idled
 ./install.sh
 ```
 
-The installer builds release binaries, installs them to `~/.local/bin/`, sets up default configuration, reloads systemd, and enables the user service.
+The installer builds release binaries and places them in:
+- `~/.local/bin/steam-idled`
+- `~/.local/bin/cs`
+- `~/.local/bin/libsteam_api.so`
 
-Check service status anytime:
+It also creates `~/.config/steam-idled/config.toml` (if not already present) and installs the user systemd service.
+
+Ensure `~/.local/bin` is in your `PATH`:
 
 ```bash
-$ systemctl --user status steam-idled.service
-● steam-idled.service - Steam Idle Daemon
-     Loaded: loaded (/home/user/.config/systemd/user/steam-idled.service; enabled)
-     Active: active (running)
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-### 2. Basic Usage
+## Configuration
 
-Check current status:
+Configuration is stored in `~/.config/steam-idled/config.toml`:
+
+```toml
+# Automatically start idling configured games when daemon starts
+enabled = true
+
+# Default AppIDs to idle
+games = [730]
+
+# Pause idle when real game executable is detected in /proc
+auto_resume = true
+
+# Seconds to wait after real game process exits before resuming idle
+resume_delay_seconds = 10
+
+# Seconds to wait between retries when Steam is not running
+steam_retry_seconds = 15
+```
+
+## Usage
 
 ```bash
-$ cs status
+cs status        # Show daemon, Steam, and idle status
+cs start         # Start idling default game (AppID 730)
+cs start 730 570 # Start idling specific games
+cs stop          # Stop idling and set manual override
+cs stop 570      # Stop idling a specific AppID
+cs restart       # Restart active idle session
+cs games         # List configured games and active state
+cs logs          # View recent daemon logs
+cs version       # Show version info
+cs daemon status # Ping daemon process
+cs daemon stop   # Stop the daemon
+```
 
+### Examples
+
+Check status:
+
+```text
+$ cs status
 Steam Idle
 ────────────────────────
 Daemon:          RUNNING
@@ -56,27 +114,25 @@ Steam:           CONNECTED
 Idle:            ACTIVE
 Game:            Counter-Strike 2
 AppID:           730
-Session:         01:27:42
+Session:         00:42:15
 Real process:    NOT RUNNING
 Auto-resume:     ENABLED
 ```
 
-Temporarily stop idling (e.g. before playing real CS2):
+Stop idling:
 
-```bash
+```text
 $ cs stop
-
 Steam Idle
 ────────────────────────
 ✓ Idle stopped
 ✓ Automatic idle temporarily disabled
 ```
 
-Status with manual override active:
+Status after stop:
 
-```bash
+```text
 $ cs status
-
 Steam Idle
 ────────────────────────
 Daemon:          RUNNING
@@ -89,9 +145,8 @@ Auto-resume:     ENABLED
 
 Resume idling:
 
-```bash
+```text
 $ cs start
-
 Steam Idle
 ────────────────────────
 ✓ Manual stop cleared
@@ -101,119 +156,82 @@ Steam Idle
   AppID: 730
 ```
 
----
+## systemd
 
-## Automatic Startup & Steam Retry
-
-When your Linux user session starts:
-
-```text
-PC boot / Login
-      ↓
-user session started
-      ↓
-steam-idled launches via systemd --user
-      ↓
-check Steam
-      │
-      ├── Steam is running ──► connect ──► start idle (AppID 730)
-      │
-      └── Steam NOT running
-              ↓
-          WAIT 15 seconds
-              ↓
-          check Steam again
-              ↓
-          (repeats every 15s until Steam appears)
-              ↓
-          Steam detected ──► connect ──► start idle
-```
-
-Log output during retry:
-
-```text
-INFO daemon started
-INFO checking Steam connection
-WARN Steam is not running
-INFO retrying Steam connection in 15 seconds
-INFO checking Steam connection
-INFO Steam detected
-INFO connected to Steam
-INFO starting idle for appid=[730]
-INFO idle active
-```
-
----
-
-## Manual Override (`cs stop` vs `auto_resume`)
-
-| Trigger | What Happens | Will Idle Auto-Resume? |
-|---|---|---|
-| `cs stop` | Manual stop activated; game presence cleared | **NO**. Remains stopped until you run `cs start`. |
-| `cs start` | Manual stop cleared; game presence enabled | **YES**. Active and running. |
-| Real CS2 launched | Idle suspended (`auto_resume`) | **YES**. Automatically resumes after real CS2 closes + debounce delay. |
-
----
-
-## Configuration
-
-Configuration is located at `~/.config/steam-idled/config.toml`:
-
-```toml
-# Automatically start idling on daemon / user session launch
-enabled = true
-
-# Default list of Steam AppIDs to idle
-games = [730]
-
-# Auto-resume when real game process launches and exits
-auto_resume = true
-
-# Debounce delay (in seconds) after real game exits before resuming idle
-resume_delay_seconds = 10
-
-# Seconds to wait between retries when Steam is not running
-steam_retry_seconds = 15
-```
-
----
-
-## CLI Reference (`cs`)
-
-| Command | Example | Description |
-|---|---|---|
-| `cs status` | `cs status` | Display daemon, Steam, and idle status |
-| `cs start` | `cs start` | Clear manual stop and start idling default game |
-| `cs start [APPID...]` | `cs start 730 570` | Idle specific AppIDs |
-| `cs stop` | `cs stop` | Stop all active idle games and set manual override |
-| `cs stop [APPID...]` | `cs stop 570` | Stop idling a specific AppID |
-| `cs restart` | `cs restart` | Restart current idle session |
-| `cs games` | `cs games` | View configured and active games |
-| `cs logs` | `cs logs -n 50` | View recent daemon logs |
-| `cs version` | `cs version` | Print version information |
-| `cs daemon status` | `cs daemon status` | Ping daemon process |
-| `cs daemon stop` | `cs daemon stop` | Request clean daemon termination |
-
----
-
-## Systemd User Service
+The daemon runs as a user systemd service (`steam-idled.service`):
 
 ```bash
-# Enable on user login
 systemctl --user enable steam-idled.service
-
-# Start or restart
-systemctl --user restart steam-idled.service
-
-# Stop
-systemctl --user stop steam-idled.service
-
-# Check service status
+systemctl --user start steam-idled.service
 systemctl --user status steam-idled.service
+systemctl --user restart steam-idled.service
+systemctl --user stop steam-idled.service
 ```
 
----
+Unit file location: `~/.config/systemd/user/steam-idled.service`.
+
+## Auto-start
+
+When `enabled = true` in `config.toml`, the daemon automatically connects to Steam and starts idling the configured games as soon as it launches. If Steam is not yet open when you log in, `steam-idled` waits and retries every 15 seconds until Steam appears.
+
+If you prefer to trigger `cs start` with a delay after login via a standalone oneshot systemd unit, an example is provided in `systemd/cs-autostart.service.example`:
+
+```bash
+cp systemd/cs-autostart.service.example ~/.config/systemd/user/cs-autostart.service
+systemctl --user daemon-reload
+systemctl --user enable cs-autostart.service
+```
+
+## Project structure
+
+```text
+├── Cargo.toml
+├── install.sh
+├── systemd/
+│   ├── steam-idled.service
+│   └── cs-autostart.service.example
+├── config/
+│   └── config.example.toml
+├── docs/
+│   ├── architecture.md
+│   ├── configuration.md
+│   └── steam-protocol.md
+└── crates/
+    ├── protocol/      # IPC protocol, state machine, config, and game metadata
+    ├── steam/         # SteamClient abstraction, RealSteamClient, and MockSteamClient
+    ├── daemon/        # steam-idled daemon binary, process detector, worker runner
+    └── cli/           # cs command-line tool
+```
+
+## Testing
+
+```bash
+cargo test --all
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo build --release
+```
+
+Currently, 17 automated tests cover:
+- TOML configuration parsing and validation fallbacks
+- Explicit state machine transitions and invalid transition rejections
+- Game database metadata resolution
+- IPC framing and serialization over Unix sockets
+- Mock Steam client lifecycle and disconnect simulation
+- Process detection and debounce logic for real game binaries
+- Auto-resume after real game exits
+- Startup with Steam unavailable and 15-second retry timer
+- Manual override (`cs stop` prevents auto-restart; `cs start` clears override)
+- Multi-game concurrent idle and partial stops
+
+## Limitations
+
+- Requires the official Steam desktop client to be running and logged in.
+- Linux only.
+- The daemon does not launch or emulate the game executable; it reports presence through the Steam client connection.
+- Games must be owned or free-to-play on the logged-in account (e.g., Counter-Strike 2 is free).
+- Playtime accounting is governed by Valve's servers and the Steam client.
 
 ## License
 
-MIT License.
+[MIT](LICENSE)

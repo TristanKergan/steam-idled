@@ -1,0 +1,11 @@
+[Unit]
+Description=Start Steam Idle after login
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc 'sleep 10; exec %h/.local/bin/cs start'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

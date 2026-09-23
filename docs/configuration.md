@@ -1,6 +1,6 @@
 # Configuration & Management
 
-`steam-idled` configuration is stored in TOML format at:
+Configuration is stored in TOML format at:
 ```text
 ~/.config/steam-idled/config.toml
 ```
@@ -10,10 +10,10 @@
 ## 1. Configuration Options
 
 ```toml
-# Start idling automatically when daemon begins running
-enabled = false
+# Automatically start idling on daemon / user session launch
+enabled = true
 
-# Default list of Steam AppIDs to idle when "cs start" is called without arguments
+# Default list of Steam AppIDs to idle
 # 730 = Counter-Strike 2
 # 570 = Dota 2
 # 440 = Team Fortress 2
@@ -26,6 +26,9 @@ auto_resume = true
 
 # Debounce delay in seconds after real game closes before resuming idle
 resume_delay_seconds = 10
+
+# Seconds to wait between retries when Steam is not running
+steam_retry_seconds = 15
 
 # Optional custom Unix Domain Socket path
 # Defaults to $XDG_RUNTIME_DIR/steam-idled.sock (or ~/.run/steam-idled.sock)
@@ -42,15 +45,15 @@ resume_delay_seconds = 10
 
 | Command | Description |
 |---|---|
-| `cs start [APPID...]` | Start idling default or specified AppIDs |
-| `cs stop [APPID...]` | Stop idling all or specified AppIDs |
 | `cs status` | Display current daemon and Steam status |
+| `cs start [APPID...]` | Clear manual stop and start idling default or specified AppIDs |
+| `cs stop [APPID...]` | Stop idling all or specified AppIDs and activate manual override |
 | `cs restart` | Restart current idle session |
 | `cs games` | View configured and active games |
 | `cs logs [-n lines]` | Display recent lines from daemon log |
 | `cs version` | Show CLI and protocol version |
 | `cs daemon status` | Ping daemon connectivity |
-| `cs daemon stop` | Stop daemon service |
+| `cs daemon stop` | Request daemon shutdown |
 
 ---
 
