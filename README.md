@@ -182,6 +182,30 @@ systemctl --user daemon-reload
 systemctl --user enable cs-autostart.service
 ```
 
+## Telegram Bot (`steam-idled-bot`)
+
+For headless setups or controlling idle presence from a smartphone:
+
+1. Create a bot using [@BotFather](https://t.me/BotFather) and get a bot token.
+2. Get your numeric Telegram User ID using [@userinfobot](https://t.me/userinfobot).
+3. Create `~/.config/steam-idled/bot.toml`:
+
+```toml
+bot_token = "1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ"
+admin_user_id = 123456789
+```
+
+4. Enable and start the bot service:
+
+```bash
+systemctl --user enable --now steam-idled-bot.service
+```
+
+### Bot features
+- Dynamic inline keyboard: `[ ⏹ Остановить фарм ]` / `[ ▶️ Запустить фарм ]` and `[ 🔄 Обновить ]`.
+- Live hardware telemetry: CPU temperature, RAM usage, battery status/charge %, and system uptime.
+- Restricted access: ignores commands and callbacks from any user other than `admin_user_id`.
+
 ## Project structure
 
 ```text
@@ -189,9 +213,11 @@ systemctl --user enable cs-autostart.service
 ├── install.sh
 ├── systemd/
 │   ├── steam-idled.service
+│   ├── steam-idled-bot.service
 │   └── cs-autostart.service.example
 ├── config/
-│   └── config.example.toml
+│   ├── config.example.toml
+│   └── bot.example.toml
 ├── docs/
 │   ├── architecture.md
 │   ├── configuration.md
@@ -200,7 +226,8 @@ systemctl --user enable cs-autostart.service
     ├── protocol/      # IPC protocol, state machine, config, and game metadata
     ├── steam/         # SteamClient abstraction, RealSteamClient, and MockSteamClient
     ├── daemon/        # steam-idled daemon binary, process detector, worker runner
-    └── cli/           # cs command-line tool
+    ├── cli/           # cs command-line tool
+    └── bot/           # steam-idled-bot Telegram bot and hardware telemetry
 ```
 
 ## Testing
@@ -212,7 +239,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release
 ```
 
-Currently, 17 automated tests cover:
+Currently, 24 automated tests cover:
 - TOML configuration parsing and validation fallbacks
 - Explicit state machine transitions and invalid transition rejections
 - Game database metadata resolution
@@ -223,6 +250,8 @@ Currently, 17 automated tests cover:
 - Startup with Steam unavailable and 15-second retry timer
 - Manual override (`cs stop` prevents auto-restart; `cs start` clears override)
 - Multi-game concurrent idle and partial stops
+- Telegram Bot update/callback deserialization and authorization filtering
+- Linux `/proc/meminfo` and `/proc/uptime` telemetry parsing
 
 ## Limitations
 

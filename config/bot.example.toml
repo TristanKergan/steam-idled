@@ -1,0 +1,16 @@
+# steam-idled-bot configuration file
+# Location: ~/.config/steam-idled/bot.toml
+
+# Telegram bot token from @BotFather
+bot_token = "1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ"
+
+# Your numeric Telegram user ID (from @userinfobot or @raw_data_bot)
+# Only this user ID will be permitted to control the bot and view telemetry.
+admin_user_id = 123456789
+
+# Optional custom Unix domain socket path
+# Defaults to $XDG_RUNTIME_DIR/steam-idled.sock
+# socket_path = "/run/user/1000/steam-idled.sock"
+
+# Telegram long-polling timeout in seconds (default: 30)
+poll_timeout_secs = 30

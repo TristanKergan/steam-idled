@@ -1,0 +1,12 @@
+[Unit]
+Description=Steam Idle Telegram Bot
+After=network-online.target steam-idled.service
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/steam-idled-bot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
